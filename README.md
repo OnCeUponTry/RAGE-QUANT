@@ -1,93 +1,76 @@
 # rage-quant
 
-**High-performance quantized GEMV kernels for CPU-only LLM inference in pure Rust.**
+**Run LLMs 3x faster on your CPU — no GPU required.**
 
-Direct dot product on GGML quantized tensor blocks (Q8_0, Q6_K, Q4_K) with AVX2+FMA SIMD acceleration — achieving **3.0x decode speedup** without GPU.
+Pure Rust quantized GEMV kernels that perform matrix-vector multiplication directly on GGML quantized data (Q8_0, Q6_K, Q4_K) with AVX2+FMA SIMD. No dequantization. No wasted bandwidth. No GPU needed.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-pure-orange.svg)]()
 
 ---
 
-## What is this?
+## Why use rage-quant?
 
-`rage-quant` provides optimized kernels that perform matrix-vector multiplication (GEMV) **directly on quantized data** — without dequantizing to dense f32 tensors first.
+If you are building a Rust LLM inference pipeline and want CPU performance that approaches GPU speed on small-to-medium models, this crate gives you the core computation kernels.
 
-### The Problem
+### The problem with standard inference
 
-Traditional LLM inference on CPU follows this path:
+Every existing Rust framework (candle, burn) does this:
+
 ```
-quantized weights (Q8_0) → dequantize to f32 → f32 GEMV → result
+GGUF quantized weights -> dequantize to f32 -> f32 GEMV -> result
+               4x DRAM bandwidth wasted ^    ^ 3.2 GB RAM for dense cache
 ```
-This wastes:
-- **4x DRAM bandwidth** (reading 4 bytes/element instead of ~1 byte)
-- **RAM for dense cache** (full f32 copy of every weight tensor)
-- **CPU cycles** on the dequantization step itself
 
-### The Solution
+### What rage-quant does differently
 
-rage-quant skips dequantization entirely:
 ```
-quantized weights (Q8_0) → quantized GEMV → result
+GGUF quantized weights -> quantized GEMV -> result
+         reads 1.06 bytes/element instead of 4 bytes = 3.76x less DRAM traffic
 ```
-- Reads **1.06 bytes/element** instead of 4 bytes (3.76x bandwidth savings)
-- **Zero dense f32 cache** — weights stay quantized in memory
-- AVX2+FMA SIMD processes 8 quantized values per cycle
 
-## Benchmarks
+**No dequantization step. No f32 cache. 57% less RAM. 3x faster decode.**
 
-Validated on **Qwen3-0.6B-Q8_0.gguf** | CPU-only | Ryzen 9 9900X | 12 threads (rayon)
+## Real benchmarks (not theoretical)
 
-| Metric                           | Before    | After     | Improvement |
-|----------------------------------|-----------|-----------|-------------|
-| Decode per token                 | 42 ms     | 14 ms     | **3.0x**    |
-| From naive implementation        | 120,000ms | 466 ms    | **257x**    |
-| From sgemm baseline              | 74,758 ms | 466 ms    | **160x**    |
-| From stable P5 baseline          | 788 ms    | 466 ms    | **40.9%**   |
-| Peak RSS (dense cache eliminated)| 3.2 GB    | 1.38 GB   | **-57%**    |
-| Throughput (decode)              | ~24 tok/s | 67-71 tok/s| **~3x**    |
+Tested on **Qwen3-0.6B-Q8_0.gguf** | CPU-only | AMD Ryzen 9 9900X | 12 threads
 
-### Key insight: memory-bound, not compute-bound
+| What we measured                      | Before       | After       | Improvement    |
+|---------------------------------------|-------------|-------------|----------------|
+| Decode latency per token              | 42 ms       | 14 ms       | **3.0x faster**|
+| From naive Rust implementation        | 120,000 ms  | 466 ms      | **257x faster**|
+| From sgemm baseline (standard BLAS)   | 74,758 ms   | 466 ms      | **160x faster**|
+| Peak RAM usage                        | 3.2 GB      | 1.38 GB     | **57% less**   |
+| Throughput                            | ~24 tok/s   | 67-71 tok/s | **~3x more**   |
 
-On modern CPUs, LLM inference decode (batch=1) is **DRAM bandwidth-limited**, not compute-limited. By reading quantized data directly (1 byte vs 4 bytes per element), we reduce the bottleneck by 3.76x — which translates directly to the 3.0x speedup observed.
+These numbers are real, measured, reproducible. See [docs/cpu-optimizations.md](docs/cpu-optimizations.md) for methodology.
 
-## Supported Formats
+### Why is it faster? One insight.
 
-| Format | Block size | Bits/weight | Dot product function | SIMD |
-|--------|-----------|------------|---------------------|------|
-| Q8_0   | 32        | 8          | `dot_q8_0_f32()`    | AVX2+FMA |
-| Q6_K   | 256       | 6          | `dot_q6_k_f32()`    | Scalar (AVX2 planned) |
-| Q4_K   | 256       | 4          | `dot_q4_k_f32()`    | Scalar (AVX2 planned) |
+On modern CPUs, LLM decode (batch=1) is **DRAM bandwidth-limited**, not compute-limited. By reading 1 byte (quantized) instead of 4 bytes (f32), you move 3.76x less data through the memory bus. The speedup follows directly.
 
-## Installation
+Additionally: **LLVM cannot auto-vectorize the i8-to-f32 widening path.** It tries i8->i16->i32->f32, wasting registers. Manual `vpmovsxbd` (i8->i32 direct) via `_mm256_cvtepi8_epi32` is required. This is why hand-written AVX2 intrinsics beat the compiler here.
 
-Add to your `Cargo.toml`:
+## Quick start
+
+### Install
+
 ```toml
 [dependencies]
 rage-quant = "0.1"
 ```
 
-Or clone and build:
-```bash
-git clone https://github.com/OnCeUponTry/rage-quant.git
-cd rage-quant
-cargo build --release
-cargo test
-```
-
-## Usage
-
-### Direct quantized dot product (the main feature)
+### Quantized dot product (the main feature)
 
 ```rust
 use rage_quant::dot_q8_0_f32;
 
-// quantized_weights: &[u8] — raw Q8_0 blocks from GGUF file
-// input_vector: &[f32] — your activation vector
-// num_elements: number of f32 elements represented
+// quantized_weights: &[u8] -- raw Q8_0 blocks straight from a GGUF file
+// input_vector: &[f32] -- your activation vector
+// num_elements: total number of f32 elements represented
 
 let result = dot_q8_0_f32(&quantized_weights, &input_vector, num_elements);
-// Automatically uses AVX2+FMA if available, falls back to scalar
+// Auto-detects AVX2+FMA at runtime; falls back to scalar on older CPUs
 ```
 
 ### Other quantization formats
@@ -95,116 +78,99 @@ let result = dot_q8_0_f32(&quantized_weights, &input_vector, num_elements);
 ```rust
 use rage_quant::{dot_q6_k_f32, dot_q4_k_f32};
 
-let result_q6 = dot_q6_k_f32(&q6k_data, &input_vector, num_elements);
-let result_q4 = dot_q4_k_f32(&q4k_data, &input_vector, num_elements);
+let result_q6 = dot_q6_k_f32(&q6k_data, &input, num_elements);
+let result_q4 = dot_q4_k_f32(&q4k_data, &input, num_elements);
 ```
 
-### Dequantization (if you need f32 output)
+### Dequantization (when you need raw f32)
 
 ```rust
 use rage_quant::{dequantize_q8_0_block, dequantize_q4_k_block, dequantize_q6_k_block};
 
-let f32_values = dequantize_q8_0_block(&block_bytes)?;  // 32 f32 values
-let f32_q4k = dequantize_q4_k_block(&block_bytes)?;     // 256 f32 values
-let f32_q6k = dequantize_q6_k_block(&block_bytes)?;     // 256 f32 values
+let f32_values = dequantize_q8_0_block(&block_bytes).unwrap();  // -> 32 f32 values
+let f32_q4k = dequantize_q4_k_block(&block_bytes).unwrap();     // -> 256 f32 values
+let f32_q6k = dequantize_q6_k_block(&block_bytes).unwrap();     // -> 256 f32 values
 ```
 
-### Parallel GEMV/GEMM
+### Parallel GEMV and GEMM (f32, rayon-accelerated)
 
 ```rust
-use rage_quant::{gemv_par, gemm_par, dot_f32};
+use rage_quant::{gemv_rows_f32, gemm_f32_row_major, dot_f32};
 
-// Parallel matrix-vector multiply (rayon)
-let output = gemv_par(&matrix, &vector, rows, cols);
+// Matrix-vector multiply (uses all cores via rayon)
+let output = gemv_rows_f32(&matrix_data, num_cols, &vector);
 
-// Parallel matrix-matrix multiply
-let output = gemm_par(&a, &b, m, n, k);
+// Matrix-matrix multiply (rayon + gemm crate backend)
+let output = gemm_f32_row_major(m, n, k, &a, &b);
 
-// Single dot product with AVX2
+// Single dot product with AVX2+FMA
 let dot = dot_f32(&a, &b);
 ```
 
-## How it works
+## Supported quantization formats
 
-### Q8_0 quantized dot product
+| Format | Block size | Bits/weight | Function             | SIMD status     |
+|--------|-----------|-------------|----------------------|-----------------|
+| Q8_0   | 32        | 8           | `dot_q8_0_f32()`     | **AVX2+FMA**    |
+| Q6_K   | 256       | 6           | `dot_q6_k_f32()`     | Scalar (AVX2 planned) |
+| Q4_K   | 256       | 4           | `dot_q4_k_f32()`     | Scalar (AVX2 planned) |
 
-Each Q8_0 block contains:
-- 2 bytes: f16 scale factor `d`
-- 32 bytes: 32 signed 8-bit quantized values
+## How it compares
 
-Traditional approach: `dequantize(q) = d * q_i` for each element, then dot product on f32.
-
-rage-quant approach: accumulate `d * sum(q_i * x_i)` per block, avoiding f32 materialization.
-
-### AVX2+FMA implementation
-
-The AVX2 kernel processes 32 quantized values per block in 4 groups of 8:
-
-```
-For each group of 8 values:
-  1. _mm_loadl_epi64     — load 8 bytes (i8 quantized values)
-  2. _mm256_cvtepi8_epi32 — sign-extend i8 → i32 (vpmovsxbd)
-  3. _mm256_cvtepi32_ps   — convert i32 → f32 (vcvtdq2ps)
-  4. _mm256_mul_ps         — multiply by scale factor d
-  5. _mm256_fmadd_ps       — fused multiply-add with input vector
-```
-
-This pattern is critical because **LLVM cannot auto-vectorize the i8→f32 widening path** — manual intrinsics are required.
-
-Final horizontal reduction uses the standard SSE `movehdup + movehl + add_ss` pattern.
-
-## Comparison with existing tools
-
-| Feature                        | rage-quant | llama.cpp (ggml) | candle (HF) | burn   |
-|-------------------------------|------------|-------------------|-------------|--------|
-| Language                       | Pure Rust  | C/C++             | Rust        | Rust   |
-| Quantized GEMV (no deq.)      | **Yes**    | Yes (C)           | No          | No     |
-| AVX2 SIMD for quant dot       | **Yes**    | Yes (C)           | Partial     | No     |
-| Q8_0/Q6_K/Q4_K support        | **Yes**    | Yes               | Q8_0 only   | No     |
-| GGUF native                   | **Yes**    | Yes               | Limited     | No     |
-| Standalone crate               | **Yes**    | No (monolith)     | Framework   | Framework |
-| Zero C/C++ dependencies        | **Yes**    | No (is C++)       | Has some    | Yes    |
-| Measured decode speedup        | **3.0x**   | Baseline          | N/A         | N/A    |
+| Feature                        | rage-quant     | llama.cpp (ggml)  | candle (HuggingFace) | burn       |
+|-------------------------------|----------------|-------------------|----------------------|------------|
+| Language                       | **Pure Rust**  | C/C++             | Rust                 | Rust       |
+| Quantized GEMV (skip deq.)    | **Yes**        | Yes (in C)        | No                   | No         |
+| AVX2 SIMD on quantized data   | **Yes**        | Yes (in C)        | Partial              | No         |
+| Q8_0 + Q6_K + Q4_K            | **Yes**        | Yes               | Q8_0 only            | No         |
+| GGUF-native blocks             | **Yes**        | Yes               | Limited              | No         |
+| Standalone reusable crate      | **Yes**        | No (monolithic)   | No (framework)       | No (framework) |
+| Zero C/C++ dependency          | **Yes**        | No (is C/C++)     | Has some C deps      | Yes        |
+| Measured 3x decode speedup     | **Yes**        | Baseline          | N/A                  | N/A        |
 
 ### Why not just use llama.cpp?
 
-llama.cpp is excellent but:
-1. It is C/C++ — if you are building a Rust inference pipeline, you need FFI bindings
-2. It is monolithic — you cannot use just the quantized GEMV without the entire engine
-3. rage-quant is a **standalone Rust crate** you can `cargo add` to any project
+llama.cpp is excellent, but:
+1. **It is C/C++** -- integrating into a Rust project requires unsafe FFI bindings
+2. **It is monolithic** -- you cannot extract just the quantized dot product without pulling the entire engine
+3. **rage-quant is a standalone Rust crate** -- `cargo add rage-quant` and you have the kernels
 
-## CPU Optimization Findings (T1-T9)
+### Why not candle or burn?
 
-This crate embodies 9 validated CPU inference optimizations. See [docs/cpu-optimizations.md](docs/cpu-optimizations.md) for the complete findings with formulas and evidence.
+Neither implements quantized GEMV on GGUF blocks. They dequantize to f32 first, losing the bandwidth advantage that gives rage-quant its 3x speedup.
 
-| ID | Optimization | Measured Result |
-|----|-------------|-----------------|
-| T1 | GEMV on quantized data (skip f32) | decode 42ms → 18ms = 2.3x |
-| T2 | Eliminate dense f32 caches | RSS 3.2GB → 1.38GB = -57% |
-| T3 | AVX2 widening i8→f32 intrinsics | +18.8% on top of T1 |
-| T4 | Memory-bound diagnosis | Proved DRAM bottleneck |
-| T5 | In-place residual addition | Marginal on 0.6B |
-| T6 | Software prefetch hints | ~10-20% on 14B+ (estimated) |
-| T7 | GEMV vs sgemm for m=1 decode | sgemm 180ms vs GEMV 18ms = 10x |
-| T8 | QKV fusion (decode-only) | 1.8x per-layer QKV |
-| T9 | Column-tiling for GEMM prefill | 5091ms → 3057ms = 1.67x |
+## CPU optimization findings (T1-T9)
 
-## Hardware Requirements
+This crate embodies 9 validated CPU inference optimizations discovered during development. Full details with formulas, measurements, and methodology in [docs/cpu-optimizations.md](docs/cpu-optimizations.md).
 
-- **Minimum**: Any x86_64 CPU (scalar fallback)
-- **Recommended**: CPU with AVX2+FMA (Intel Haswell+ / AMD Zen+)
-- **Tested on**: AMD Ryzen 9 9900X (Zen 5), 12 threads
+| ID | What was optimized                      | Measured result                          |
+|----|----------------------------------------|------------------------------------------|
+| T1 | GEMV on quantized data (skip f32)      | decode 42ms -> 18ms = **2.3x**          |
+| T2 | Eliminate dense f32 weight caches      | RSS 3.2GB -> 1.38GB = **-57% RAM**      |
+| T3 | AVX2 widening i8->f32 intrinsics      | **+18.8%** on top of T1                  |
+| T4 | Memory-bound diagnosis                 | Proved DRAM is the bottleneck            |
+| T5 | In-place residual addition             | Marginal on small models                 |
+| T6 | Software prefetch hints                | ~10-20% estimated on 14B+ models         |
+| T7 | GEMV vs sgemm for m=1 decode           | sgemm 180ms vs GEMV 18ms = **10x**      |
+| T8 | QKV fusion (decode-only path)          | **1.8x** per-layer QKV compute           |
+| T9 | Column-tiling for GEMM prefill         | 5091ms -> 3057ms = **1.67x**             |
 
-ARM/NEON support is planned but not yet implemented.
+## Hardware requirements
+
+- **Minimum**: Any x86_64 CPU (scalar fallback works everywhere)
+- **Recommended**: AVX2+FMA support (Intel Haswell 2013+ / AMD Zen 2017+)
+- **Tested on**: AMD Ryzen 9 9900X (Zen 5), DDR5, 12 threads
+
+ARM NEON and AVX-512 support are planned.
 
 ## License
 
-This project is dual-licensed:
+Dual-licensed:
 
-- **Open Source**: [AGPL-3.0](LICENSE) — free for open-source projects and personal/academic use
-- **Commercial**: [Commercial License](LICENSE-COMMERCIAL.md) — for proprietary/closed-source use
+- **Open Source**: [AGPL-3.0](LICENSE) -- free for open-source, personal, and academic use
+- **Commercial**: [Commercial License](LICENSE-COMMERCIAL.md) -- for proprietary/closed-source use
 
-For commercial licensing inquiries, contact: the@angriestboy.com
+For commercial licensing: the@angriestboy.com
 
 ## Author
 
@@ -214,12 +180,11 @@ For commercial licensing inquiries, contact: the@angriestboy.com
 
 ## Contributing
 
-Contributions are welcome under the terms of the AGPL-3.0 license.
-By submitting a pull request, you agree to license your contribution under AGPL-3.0.
+Contributions welcome under AGPL-3.0. By submitting a PR, you agree to license your contribution under the same terms.
 
-Priority areas for contribution:
+**Priority areas:**
 - AVX2 SIMD for Q6_K and Q4_K dot products
 - ARM NEON implementation
 - AVX-512 implementation
-- Benchmarks on different hardware
-- Additional quantization format support (Q5_K, Q2_K, IQ formats)
+- Benchmarks on different hardware (Intel, older AMD, server CPUs)
+- Additional quantization formats (Q5_K, Q2_K, IQ formats)
