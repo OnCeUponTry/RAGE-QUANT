@@ -2,7 +2,7 @@
 name = "rage-quant"
 version = "0.1.0"
 edition = "2021"
-authors = ["Carlos Enrique Castro Lazaro <leomilo211991@gmail.com>"]
+authors = ["Carlos Enrique Castro Lazaro <the@angriestboy.com>"]
 description = "High-performance quantized GEMV kernels for CPU-only LLM inference. Direct dot product on Q8_0/Q6_K/Q4_K GGUF blocks with AVX2+FMA SIMD — 3.0x decode speedup."
 license = "AGPL-3.0-only"
 repository = "https://github.com/OnCeUponTry/rage-quant"

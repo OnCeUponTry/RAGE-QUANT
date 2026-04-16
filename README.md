@@ -204,7 +204,7 @@ This project is dual-licensed:
 - **Open Source**: [AGPL-3.0](LICENSE) — free for open-source projects and personal/academic use
 - **Commercial**: [Commercial License](LICENSE-COMMERCIAL.md) — for proprietary/closed-source use
 
-For commercial licensing inquiries, contact: leomilo211991@gmail.com
+For commercial licensing inquiries, contact: the@angriestboy.com
 
 ## Author
 
