@@ -1,0 +1,19 @@
+RAGE QUANT — Quantized GEMV Kernels for CPU Inference
+Copyright (c) 2026 Carlos Enrique Castro Lazaro (OnCeUponTry)
+
+Original author and maintainer:
+  Carlos Enrique Castro Lazaro
+  GitHub: https://github.com/OnCeUponTry
+  Website: https://www.angriestboy.com
+
+This software contains original implementations of:
+  - Direct quantized dot product on Q8_0, Q6_K, Q4_K GGUF blocks
+  - AVX2+FMA SIMD acceleration for quantized GEMV
+  - Rayon-parallelized GEMV and GEMM operations
+  - Dequantization routines for GGML quantization formats
+
+Achieving 3.0x decode speedup on CPU-only LLM inference.
+Validated on Qwen3-0.6B-Q8_0.gguf, Ryzen 9 9900X, 12 threads.
+
+This NOTICE file must be included in all copies or substantial
+portions of this software, as required by the AGPL-3.0 license.
