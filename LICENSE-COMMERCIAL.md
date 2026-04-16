@@ -25,7 +25,7 @@ A commercial license allows you to:
 ### Contact
 
 For commercial licensing inquiries:
-- Email: leomilo211991@gmail.com
+- Email: the@angriestboy.com
 - GitHub: https://github.com/OnCeUponTry
 
 ### Pricing
