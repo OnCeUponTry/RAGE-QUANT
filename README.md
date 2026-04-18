@@ -1,14 +1,3 @@
----
-title: RAGE-QUANT
-emoji: ⚡
-colorFrom: orange
-colorTo: blue
-sdk: rust
-app_file: Cargo.toml
-pytorch: false
-tensorflow: false
----
-
 # RAGE-QUANT
 
 **Run LLMs 3x faster on your CPU — no GPU required.**
